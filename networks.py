@@ -89,12 +89,13 @@ class DenseResNet(eqx.Module):
     def __call__(self, x):
         x = self.input_layer(x)
         x = self.activation(x)
-
+        interms = []
         for block in self.blocks:
             x = block(x)
-
+            interms.append(x)
+            
         x = self.output_layer(x)
-        return x
+        return x, interms
 
 
 class EquivariantLinear(eqx.Module):
@@ -228,15 +229,16 @@ class ValueNet(eqx.Module):
         x1 = jnp.ravel(x1)
         x2 = jnp.ravel(x2)
 
-        o1 = self.body(x1)
-        o2 = self.body(x2)
+        o1, interms1 = self.body(x1)
+        o2, interms2 = self.body(x2)
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
-        if not self.avg_symmetries:
-            return v1
-
-        return v
+        
+        if self.avg_symmetries:
+            return v, (interms1, interms2)
+        else:
+            return v1, interms1
 
 
 class InvariantValueHead(eqx.Module):
@@ -351,12 +353,14 @@ class InvariantValueNet(eqx.Module):
         x1 = jnp.ravel(x1)
         x2 = jnp.ravel(x2)
 
-        o1 = self.body(x1)
-        o2 = self.body(x2)
+        o1, interms1 = self.body(x1)
+        o2, interms2 = self.body(x2)
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
-        if not self.avg_symmetries:
-            return v1
+        
+        if self.avg_symmetries:
+            return v, (interms1, interms2)
+        else:
+            return v1, interms1
 
-        return v

@@ -3,6 +3,12 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+.vscode/
+*.npy
+*.csv
+*.png
+pytorch/
+
 # C extensions
 *.so
 
