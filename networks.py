@@ -35,12 +35,14 @@ class DenseResNetBlock(eqx.Module):
 
     def __call__(self, x):
         identity = x
+        block_interms = []
         for layer, layer_norm in zip(self.layers, self.layers_norm):
             x = layer(x)
             x = layer_norm(x)
             x = self.activation(x)
-
-        return x + identity
+            block_interms.append(x)
+            
+        return x + identity, block_interms
 
 
 class DenseResNet(eqx.Module):
@@ -89,13 +91,17 @@ class DenseResNet(eqx.Module):
     def __call__(self, x):
         x = self.input_layer(x)
         x = self.activation(x)
+        first = x
         interms = []
+        blocks_interms = []
         for block in self.blocks:
-            x = block(x)
+            x, block_interms = block(x)
             interms.append(x)
-            
+            blocks_interms.append(block_interms)
+    
         x = self.output_layer(x)
-        return x, interms
+        last = x
+        return x, interms, blocks_interms, first, last
 
 
 class EquivariantLinear(eqx.Module):
@@ -229,16 +235,17 @@ class ValueNet(eqx.Module):
         x1 = jnp.ravel(x1)
         x2 = jnp.ravel(x2)
 
-        o1, interms1 = self.body(x1)
-        o2, interms2 = self.body(x2)
+        o1, interms1, blocks_interms1, first1, last1 = self.body(x1)
+        o2, interms2, blocks_interms2, first2, last2 = self.body(x2)
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
         
         if self.avg_symmetries:
-            return v, (interms1, interms2)
+            # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
+            return v, interms1, blocks_interms1, first1, last1
         else:
-            return v1, interms1
+            return v1, interms1, blocks_interms1, first1, last1
 
 
 class InvariantValueHead(eqx.Module):
@@ -301,6 +308,7 @@ class InvariantValueNet(eqx.Module):
     ):
         p_idx = np.flip(np.arange(84).reshape(6, 7, 2), axis=1).reshape(-1)
         q_idx = jnp.arange(embed_dim)[::-1]
+        # q_idx = jnp.arange(embed_dim).reshape(-1, 2)[:, ::-1].reshape(-1)
         random_key, subkey = jax.random.split(key)
         self.value_head = InvariantValueHead(
             subkey,
@@ -353,14 +361,15 @@ class InvariantValueNet(eqx.Module):
         x1 = jnp.ravel(x1)
         x2 = jnp.ravel(x2)
 
-        o1, interms1 = self.body(x1)
-        o2, interms2 = self.body(x2)
+        o1, interms1, blocks_interms1, first1, last1 = self.body(x1)
+        o2, interms2, blocks_interms2, first2, last2 = self.body(x2)
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
         
         if self.avg_symmetries:
-            return v, (interms1, interms2)
+            # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
+            return v, interms1, blocks_interms1, first1, last1
         else:
-            return v1, interms1
+            return v1, interms1, blocks_interms1, first1, last1
 
