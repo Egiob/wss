@@ -76,7 +76,7 @@ class EquivariantMLP(eqx.Module):
 
         for layer, layer_norm in zip(self.layers[:-1], self.layers_norm):
             x = layer(x, p=p)
-            x = layer_norm(x)
+            # x = layer_norm(x)
             x = self.activation(x)
             p = layer.q
             block_interms.append(x)
