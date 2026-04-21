@@ -78,7 +78,7 @@ class EquivariantMLP(eqx.Module):
             x = layer(x, p=p)
             # x = layer_norm(x)
             x = self.activation(x)
-            p = layer.q
+            p = jax.lax.stop_gradient(layer.q)
             block_interms.append(x)
 
         x = self.layers[-1](x, p=p)
@@ -110,6 +110,9 @@ class EquivariantLinear(eqx.Module):
         self.q = default_init(
             key2, shape=(out_features, out_features), dtype=dtype, lim=lim
         )
+        
+        # self.q = jnp.flip(jnp.eye(out_features, dtype=dtype), axis=1)
+        
 
     # @property
     # def q(self):
@@ -291,7 +294,7 @@ class InvariantValueNet(eqx.Module):
         x1 = x.astype(jnp.float32)
         x1 = jnp.ravel(x1)
         o1, _ = self.body(x1, self.p)
-        p = self.body.layers[-1].q
+        p = jax.lax.stop_gradient(self.body.layers[-1].q)
         v1 = jnp.squeeze(self.value_head(o1, p=p))
 
         return v1
