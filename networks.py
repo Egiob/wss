@@ -143,7 +143,9 @@ class EquivariantLinear(eqx.Module):
 
         # Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
 
-        Q = 0.5 * (self.q + self.q.T)
+        # Q = 0.5 * (self.q + self.q.T)
+
+        Q = self.q
 
         if p.ndim == 1:
             W_permuted = Q @ W[:, p]
