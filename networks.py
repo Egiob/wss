@@ -174,6 +174,43 @@ class InvariantLinear(eqx.Module):
         return W_sym @ x + (b if b is not None else 0)
 
 
+
+class ValueHead(eqx.Module):
+    layers: list[eqx.Module]
+    activation: callable
+
+    def __init__(
+        self,
+        key,
+        in_size,
+        head_depth,
+        head_width,
+        activation,
+        dtype=jnp.float32,
+    ):
+
+        self.layers = []
+        for k in range(head_depth):
+            random_key, subkey = jax.random.split(key)
+
+            l = eqx.nn.Linear(
+                in_size if k == 0 else head_width,
+                head_width if k < head_depth - 1 else 1,
+                key=subkey,
+                dtype=dtype,
+            )
+            self.layers.append(l)
+
+        self.activation = activation
+
+    def __call__(self, x):
+        head_interms = []
+        for layer in self.layers[:-1]:
+            x = self.activation(layer(x))
+            head_interms.append(x)
+        x = self.layers[-1](x)
+        return x, head_interms
+    
 class ValueNet(eqx.Module):
     body: eqx.nn.MLP
     value_head: eqx.nn.MLP
@@ -195,16 +232,15 @@ class ValueNet(eqx.Module):
         simple,
     ):
         random_key, subkey = jax.random.split(key)
-        self.value_head = eqx.nn.MLP(
-            key=subkey,
-            in_size=embed_dim,
-            out_size=1,
-            depth=head_depth,
-            width_size=head_width,
-            activation=activation,
-            dtype=jnp.float32,
-        )
 
+        self.value_head = ValueHead(
+            subkey,
+            in_size=embed_dim,
+            head_depth=head_depth,
+            head_width=head_width,
+            activation=activation,
+        )
+        
         random_key, subkey = jax.random.split(random_key)
         if simple:
             self.body = eqx.nn.MLP(
@@ -237,19 +273,23 @@ class ValueNet(eqx.Module):
 
         o1, interms1, blocks_interms1, first1, last1 = self.body(x1)
         o2, interms2, blocks_interms2, first2, last2 = self.body(x2)
-        v1 = jnp.squeeze(self.value_head(o1))
-        v2 = jnp.squeeze(self.value_head(o2))
+        
+        v1, head_interms1 = self.value_head(o1)
+        v1 = jnp.squeeze(v1)
+        v2, head_interms2 = self.value_head(o2)
+        v2 = jnp.squeeze(v2)
+        
         v = (v1 + v2) / 2
         
         if self.avg_symmetries:
             # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
-            return v, interms1, blocks_interms1, first1, last1
+            return v, interms1, blocks_interms1, first1, last1, head_interms1
         else:
-            return v1, interms1, blocks_interms1, first1, last1
+            return v1, interms1, blocks_interms1, first1, last1, head_interms1
 
 
 class InvariantValueHead(eqx.Module):
-    layers: eqx.nn.MLP
+    layers: list[eqx.Module]
     activation: callable
 
     def __init__(
@@ -280,10 +320,12 @@ class InvariantValueHead(eqx.Module):
         self.activation = activation
 
     def __call__(self, x):
+        head_interms = []
         for layer in self.layers[:-1]:
             x = self.activation(layer(x))
+            head_interms.append(x)
         x = self.layers[-1](x)
-        return x
+        return x, head_interms
 
 
 class InvariantValueNet(eqx.Module):
@@ -363,13 +405,18 @@ class InvariantValueNet(eqx.Module):
 
         o1, interms1, blocks_interms1, first1, last1 = self.body(x1)
         o2, interms2, blocks_interms2, first2, last2 = self.body(x2)
-        v1 = jnp.squeeze(self.value_head(o1))
-        v2 = jnp.squeeze(self.value_head(o2))
+        
+        v1, head_interms1 = self.value_head(o1)
+        v1 = jnp.squeeze(v1)
+        
+        v2, head_interms2 = self.value_head(o2)
+        v2 = jnp.squeeze(v2)
+        
         v = (v1 + v2) / 2
         
         if self.avg_symmetries:
             # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
-            return v, interms1, blocks_interms1, first1, last1
+            return v, interms1, blocks_interms1, first1, last1, head_interms1
         else:
-            return v1, interms1, blocks_interms1, first1, last1
+            return v1, interms1, blocks_interms1, first1, last1, head_interms1
 
