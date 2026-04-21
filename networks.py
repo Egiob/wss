@@ -1,4 +1,5 @@
 import functools as ft
+import math
 
 import equinox as eqx
 import jax
@@ -41,7 +42,7 @@ class DenseResNetBlock(eqx.Module):
             x = layer_norm(x)
             x = self.activation(x)
             block_interms.append(x)
-            
+
         return x + identity, block_interms
 
 
@@ -98,7 +99,7 @@ class DenseResNet(eqx.Module):
             x, block_interms = block(x)
             interms.append(x)
             blocks_interms.append(block_interms)
-    
+
         x = self.output_layer(x)
         last = x
         return x, interms, blocks_interms, first, last
@@ -110,34 +111,46 @@ class EquivariantLinear(eqx.Module):
     linear: eqx.nn.Linear
     p_idx: jax.Array
     q_idx: jax.Array
+    # u: jax.Array
 
     def __init__(self, in_features, out_features, p_idx, q_idx, key, dtype=jnp.float32):
-        self.linear = eqx.nn.Linear(in_features, out_features, key=key, dtype=dtype)
+        key1, key2 = jax.random.split(key)
+        self.linear = eqx.nn.Linear(in_features, out_features, key=key1, dtype=dtype)
         self.p_idx = jnp.asarray(p_idx, dtype=jnp.int32)
+
+        self.u = jax.random.uniform(
+            key2,
+            (out_features),
+            dtype,
+            minval=-1 / math.sqrt(out_features),
+            maxval=1 / math.sqrt(out_features),
+        )
         self.q_idx = jnp.asarray(q_idx, dtype=jnp.int32)
 
-    @property
-    def weight(self):
-        W = self.linear.weight
-        W_permuted = W[self.q_idx, :][:, self.p_idx]
-        W_sym = 0.5 * (W + W_permuted)
-        return W_sym
+    # @property
+    # def weight(self):
+    #     W = self.linear.weight
 
-    @property
-    def bias(self):
-        b = self.linear.bias
-        if b is not None:
-            b_sym = 0.5 * (b + b[self.q_idx])
-            return b_sym
-        else:
-            return None
+    #     W_permuted = W[self.q_idx, :][:, self.p_idx]
+    #     W_sym = 0.5 * (W + W_permuted)
+
+    #     return W_sym
+
+    # @property
+    # def bias(self):
+    #     b = self.linear.bias
+    #     if b is not None:
+    #         b_sym = 0.5 * (b + b[self.q_idx])
+    #         return b_sym
+    #     else:
+    #         return None
 
     def __call__(self, x):
         W = self.linear.weight
         b = self.linear.bias
 
-        # Apply the reflection constraint: W_sym = 0.5 * (W + Q W P)
-        # In array indexing: Q is applied to rows (outputs), P to cols (inputs)
+        # Q = jnp.eye(W.shape[0]) - 2* self.
+
         W_permuted = W[self.q_idx, :][:, self.p_idx]
         W_sym = 0.5 * (W + W_permuted)
 
@@ -178,6 +191,7 @@ class ValueNet(eqx.Module):
     body: eqx.nn.MLP
     value_head: eqx.nn.MLP
     avg_symmetries: bool
+    name: str
 
     def __init__(
         self,
@@ -193,6 +207,7 @@ class ValueNet(eqx.Module):
         n_actions,
         avg_symmetries,
         simple,
+        name=None,
     ):
         random_key, subkey = jax.random.split(key)
         self.value_head = eqx.nn.MLP(
@@ -228,6 +243,10 @@ class ValueNet(eqx.Module):
 
         self.avg_symmetries = avg_symmetries
 
+        self.name = self.__class__.__name__
+        if self.name is not None:
+            self.name = name
+
     def forward(self, x):
         x1 = x.astype(jnp.float32)
         x2 = jnp.flip(x1, axis=1)
@@ -240,7 +259,7 @@ class ValueNet(eqx.Module):
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
-        
+
         if self.avg_symmetries:
             # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
             return v, interms1, blocks_interms1, first1, last1
@@ -290,6 +309,7 @@ class InvariantValueNet(eqx.Module):
     body: eqx.nn.MLP
     value_head: eqx.nn.MLP
     avg_symmetries: bool
+    name: str
 
     def __init__(
         self,
@@ -305,6 +325,7 @@ class InvariantValueNet(eqx.Module):
         n_actions,
         avg_symmetries,
         simple,
+        name=None,
     ):
         p_idx = np.flip(np.arange(84).reshape(6, 7, 2), axis=1).reshape(-1)
         q_idx = jnp.arange(embed_dim)[::-1]
@@ -353,6 +374,10 @@ class InvariantValueNet(eqx.Module):
             self.body = eqx.tree_at(lambda m: m.input_layer, self.body, input_layer)
         self.avg_symmetries = avg_symmetries
 
+        self.name = self.__class__.__name__
+        if name is not None:
+            self.name = name
+
     def forward(self, x):
         x1 = x.astype(jnp.float32)
 
@@ -366,10 +391,9 @@ class InvariantValueNet(eqx.Module):
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
-        
+
         if self.avg_symmetries:
             # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
             return v, interms1, blocks_interms1, first1, last1
         else:
             return v1, interms1, blocks_interms1, first1, last1
-
