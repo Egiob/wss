@@ -7,125 +7,113 @@ import jax.numpy as jnp
 import numpy as np
 
 
-class DenseResNetBlock(eqx.Module):
+class EquivariantMLP(eqx.Module):
     layers: list[eqx.Module]
     layers_norm: list[eqx.Module]
-    activation: callable
-
-    def __init__(self, key, depth, width_size, activation, linear_module=None):
-        if linear_module is None:
-            linear_module = eqx.nn.Linear
-
-        keys = jax.random.split(key, depth)
-        self.layers = []
-
-        self.layers_norm = []
-
-        for i in range(depth):
-            layer = linear_module(
-                width_size,
-                width_size,
-                key=keys[i],
-                dtype=jnp.float32,
-            )
-            layer_norm = eqx.nn.LayerNorm(width_size, dtype=jnp.float32)
-            self.layers.append(layer)
-            self.layers_norm.append(layer_norm)
-
-        self.activation = activation
-
-    def __call__(self, x):
-        identity = x
-        block_interms = []
-        for layer, layer_norm in zip(self.layers, self.layers_norm):
-            x = layer(x)
-            x = layer_norm(x)
-            x = self.activation(x)
-            block_interms.append(x)
-
-        return x + identity, block_interms
-
-
-class DenseResNet(eqx.Module):
-    input_layer: eqx.Module
-    blocks: list[DenseResNetBlock]
-    output_layer: eqx.Module
     activation: callable
 
     def __init__(
         self,
         key,
         in_size,
-        out_size,
         depth,
-        width_size,
-        n_blocks,
+        width,
+        out_size,
         activation,
-        linear_module=None,
+        dtype=jnp.float32,
     ):
-        if linear_module is None:
-            linear_module = eqx.nn.Linear
-        keys = jax.random.split(key, n_blocks + 2)
-        self.input_layer = linear_module(
-            in_size,
-            width_size,
-            key=keys[0],
-            dtype=jnp.float32,
-        )
-
-        self.blocks = []
-        for i in range(n_blocks):
-            block = DenseResNetBlock(
-                keys[i + 1], depth, width_size, activation, linear_module=linear_module
+        layers_norm = []
+        layers = []
+        if depth == 0:
+            key, subkey = jax.random.split(key)
+            layers.append(
+                EquivariantLinear(
+                    in_size,
+                    out_size,
+                    dtype=dtype,
+                    key=subkey,
+                )
             )
-            self.blocks.append(block)
+        else:
+            key, subkey = jax.random.split(key)
+            layers.append(
+                EquivariantLinear(
+                    in_size,
+                    width,
+                    dtype=dtype,
+                    key=subkey,
+                )
+            )
+            layers_norm.append(eqx.nn.LayerNorm(width, dtype=dtype))
+            for i in range(depth - 1):
+                key, subkey = jax.random.split(key)
+                layers.append(
+                    EquivariantLinear(
+                        width,
+                        width,
+                        dtype=dtype,
+                        key=subkey,
+                    )
+                )
+                layers_norm.append(eqx.nn.LayerNorm(width, dtype=dtype))
+            key, subkey = jax.random.split(key)
+            layers.append(
+                EquivariantLinear(
+                    width,
+                    out_size,
+                    dtype=dtype,
+                    key=subkey,
+                )
+            )
 
-        self.output_layer = linear_module(
-            width_size,
-            out_size,
-            key=keys[-1],
-            dtype=jnp.float32,
-        )
-
+        self.layers = layers
+        self.layers_norm = layers_norm
         self.activation = activation
 
-    def __call__(self, x):
-        x = self.input_layer(x)
-        x = self.activation(x)
-        first = x
-        interms = []
-        blocks_interms = []
-        for block in self.blocks:
-            x, block_interms = block(x)
-            interms.append(x)
-            blocks_interms.append(block_interms)
+    def __call__(self, x, p):
+        block_interms = []
 
-        x = self.output_layer(x)
-        last = x
-        return x, interms, blocks_interms, first, last
+        for layer, layer_norm in zip(self.layers[:-1], self.layers_norm):
+            x = layer(x, p=p)
+            x = layer_norm(x)
+            x = self.activation(x)
+            p = layer.q
+            block_interms.append(x)
+
+        x = self.layers[-1](x, p=p)
+        return x, block_interms
 
 
 class EquivariantLinear(eqx.Module):
     """Hidden layer: Equivariant to permutation."""
 
     linear: eqx.nn.Linear
-    p_idx: jax.Array
-    q_idx: jax.Array
-    # u: jax.Array
+    u: jax.Array
 
-    def __init__(self, in_features, out_features, p_idx, q_idx, key, dtype=jnp.float32):
+    def __init__(
+        self,
+        in_features,
+        out_features,
+        key,
+        dtype=jnp.float32,
+    ):
         key1, key2 = jax.random.split(key)
         self.linear = eqx.nn.Linear(in_features, out_features, key=key1, dtype=dtype)
-        self.p_idx = jnp.asarray(p_idx, dtype=jnp.int32)
 
-        # self.u = jax.random.uniform(
-        #     key2,
-        #     (out_features),
-        #     dtype,
-        #     minval=-1 / math.sqrt(out_features),
-        #     maxval=1 / math.sqrt(out_features),
-        # )
-        self.q_idx = jnp.asarray(q_idx, dtype=jnp.int32)
+        self.u = jax.random.uniform(
+            key2,
+            (out_features),
+            dtype,
+            minval=-1 / math.sqrt(out_features),
+            maxval=1 / math.sqrt(out_features),
+        )
+
+    @property
+    def q(self):
+        q = jnp.eye(self.linear.weight.shape[0]) - jnp.outer(self.u, self.u) / jnp.sum(
+            self.u**2
+        )
+        return q
 
     # @property
     # def weight(self):
@@ -145,18 +133,21 @@ class EquivariantLinear(eqx.Module):
     #     else:
     #         return None
 
-    def __call__(self, x):
+    def __call__(self, x, p):
         W = self.linear.weight
         b = self.linear.bias
 
-        # Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
+        Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
 
-        W_permuted = W[self.q_idx, :][:, self.p_idx]
+        if p.ndim == 1:
+            W_permuted = Q @ W[:, p]
+        else:
+            W_permuted = Q @ W @ p
+
         W_sym = 0.5 * (W + W_permuted)
 
-        # Apply constraint to bias: b_sym = 0.5 * (b + Q b)
         if b is not None:
-            b_sym = 0.5 * (b + b[self.q_idx])
+            b_sym = 0.5 * (b + Q @ b)
         else:
             b_sym = None
 
@@ -167,23 +158,21 @@ class InvariantLinear(eqx.Module):
     """Output layer: Invariant to permutation (collapses to a single scalar)."""
 
     linear: eqx.nn.Linear
-    p_idx: jax.Array
 
-    def __init__(self, in_features, out_features, p_idx, key, dtype=jnp.float32):
-        # Output feature is 1 (the value evaluation)
+    def __init__(self, in_features, out_features, key, dtype=jnp.float32):
         self.linear = eqx.nn.Linear(in_features, out_features, key=key, dtype=dtype)
-        self.p_idx = jnp.asarray(p_idx, dtype=jnp.int32)
 
-    def __call__(self, x):
+    def __call__(self, x, p):
         W = self.linear.weight
         b = self.linear.bias
 
-        # For a scalar output, Q is the identity matrix.
-        # W_sym = 0.5 * (W + W P)
-        W_permuted = W[:, self.p_idx]
+        if p.ndim == 1:
+            W_permuted = W[:, self.p_idx]
+        else:
+            W_permuted = W @ p
+
         W_sym = 0.5 * (W + W_permuted)
 
-        # Bias is a scalar, so it doesn't need to be permuted
         return W_sym @ x + (b if b is not None else 0)
 
 
@@ -197,49 +186,31 @@ class ValueNet(eqx.Module):
         self,
         key,
         in_size,
-        head_depth,
-        head_width,
         body_depth,
         body_width,
-        body_n_blocks,
         embed_dim,
         activation,
-        n_actions,
         avg_symmetries,
-        simple,
         name=None,
     ):
         random_key, subkey = jax.random.split(key)
-        self.value_head = eqx.nn.MLP(
+        self.value_head = eqx.nn.Linear(
             key=subkey,
-            in_size=embed_dim,
-            out_size=1,
-            depth=head_depth,
-            width_size=head_width,
-            activation=activation,
+            in_features=embed_dim,
+            out_features=1,
             dtype=jnp.float32,
         )
 
         random_key, subkey = jax.random.split(random_key)
-        if simple:
-            self.body = eqx.nn.MLP(
-                key=subkey,
-                in_size=in_size,
-                out_size=embed_dim,
-                depth=body_depth,
-                width_size=body_width,
-                activation=activation,
-            )
-        else:
-            self.body = DenseResNet(
-                subkey,
-                in_size=in_size,
-                out_size=embed_dim,
-                depth=body_depth,
-                width_size=body_width,
-                n_blocks=body_n_blocks,
-                activation=activation,
-            )
+
+        self.body = eqx.nn.MLP(
+            key=subkey,
+            in_size=in_size,
+            out_size=embed_dim,
+            depth=body_depth,
+            width_size=body_width,
+            activation=activation,
+        )
 
         self.avg_symmetries = avg_symmetries
 
@@ -254,125 +225,55 @@ class ValueNet(eqx.Module):
         x1 = jnp.ravel(x1)
         x2 = jnp.ravel(x2)
 
-        o1, interms1, blocks_interms1, first1, last1 = self.body(x1)
-        o2, interms2, blocks_interms2, first2, last2 = self.body(x2)
+        o1 = self.body(x1)
+        o2 = self.body(x2)
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
         v = (v1 + v2) / 2
 
         if self.avg_symmetries:
-            # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
-            return v, interms1, blocks_interms1, first1, last1
+            return v
         else:
-            return v1, interms1, blocks_interms1, first1, last1
-
-
-class InvariantValueHead(eqx.Module):
-    layers: eqx.nn.MLP
-    activation: callable
-
-    def __init__(
-        self,
-        key,
-        in_size,
-        head_depth,
-        head_width,
-        activation,
-        p_idx,
-        dtype=jnp.float32,
-    ):
-        p_idx = jnp.asarray(p_idx, dtype=jnp.int32)
-
-        self.layers = []
-        for k in range(head_depth):
-            random_key, subkey = jax.random.split(key)
-
-            l = InvariantLinear(
-                in_size if k == 0 else head_width,
-                head_width if k < head_depth - 1 else 1,
-                p_idx=p_idx,
-                key=subkey,
-                dtype=dtype,
-            )
-            self.layers.append(l)
-
-        self.activation = activation
-
-    def __call__(self, x):
-        for layer in self.layers[:-1]:
-            x = self.activation(layer(x))
-        x = self.layers[-1](x)
-        return x
+            return v1
 
 
 class InvariantValueNet(eqx.Module):
     body: eqx.nn.MLP
     value_head: eqx.nn.MLP
-    avg_symmetries: bool
+    p: jax.Array
     name: str
 
     def __init__(
         self,
         key,
         in_size,
-        head_depth,
-        head_width,
         body_depth,
         body_width,
-        body_n_blocks,
         embed_dim,
         activation,
-        n_actions,
-        avg_symmetries,
-        simple,
         name=None,
     ):
-        p_idx = np.flip(np.arange(84).reshape(6, 7, 2), axis=1).reshape(-1)
-        q_idx = jnp.arange(embed_dim)[::-1]
-        # q_idx = jnp.arange(embed_dim).reshape(-1, 2)[:, ::-1].reshape(-1)
-        random_key, subkey = jax.random.split(key)
-        self.value_head = InvariantValueHead(
-            subkey,
-            in_size=embed_dim,
-            head_depth=head_depth,
-            head_width=head_width,
-            activation=activation,
-            p_idx=q_idx,
+        random_key = key
+        self.p = (
+            jnp.flip(jnp.arange(84).reshape(6, 7, 2), axis=1)
+            .reshape(-1)
+            .astype(jnp.int32)
         )
         random_key, subkey = jax.random.split(random_key)
 
-        linear_module = ft.partial(EquivariantLinear, p_idx=q_idx, q_idx=q_idx)
-        if simple:
-            self.body = eqx.nn.MLP(
-                key=subkey,
-                in_size=in_size,
-                out_size=embed_dim,
-                depth=body_depth,
-                width_size=body_width,
-                activation=activation,
-            )
-        else:
-            self.body = DenseResNet(
-                subkey,
-                in_size=in_size,
-                out_size=embed_dim,
-                depth=body_depth,
-                width_size=body_width,
-                n_blocks=body_n_blocks,
-                activation=activation,
-                linear_module=linear_module,
-            )
-            random_key, subkey = jax.random.split(random_key)
-            input_layer = EquivariantLinear(
-                in_size,
-                embed_dim,
-                p_idx=p_idx,
-                q_idx=q_idx,
-                key=subkey,
-                dtype=jnp.float32,
-            )
-            self.body = eqx.tree_at(lambda m: m.input_layer, self.body, input_layer)
-        self.avg_symmetries = avg_symmetries
+        self.body = EquivariantMLP(
+            key=subkey,
+            in_size=in_size,
+            out_size=embed_dim,
+            depth=body_depth,
+            width=body_width,
+            activation=activation,
+        )
+
+        random_key, subkey = jax.random.split(key)
+        self.value_head = InvariantLinear(
+            key=subkey, in_features=embed_dim, out_features=1
+        )
 
         self.name = self.__class__.__name__
         if name is not None:
@@ -380,20 +281,9 @@ class InvariantValueNet(eqx.Module):
 
     def forward(self, x):
         x1 = x.astype(jnp.float32)
-
-        x2 = jnp.flip(x1, axis=1)
-
         x1 = jnp.ravel(x1)
-        x2 = jnp.ravel(x2)
+        o1, _ = self.body(x1, self.p)
+        p = self.body.layers[-1].q
+        v1 = jnp.squeeze(self.value_head(o1, p=p))
 
-        o1, interms1, blocks_interms1, first1, last1 = self.body(x1)
-        o2, interms2, blocks_interms2, first2, last2 = self.body(x2)
-        v1 = jnp.squeeze(self.value_head(o1))
-        v2 = jnp.squeeze(self.value_head(o2))
-        v = (v1 + v2) / 2
-
-        if self.avg_symmetries:
-            # return v, (interms1, interms2), (blocks_interms1, blocks_interms2), (first1, first2), (last1, last2)
-            return v, interms1, blocks_interms1, first1, last1
-        else:
-            return v1, interms1, blocks_interms1, first1, last1
+        return v1
