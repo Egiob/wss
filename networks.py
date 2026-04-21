@@ -118,13 +118,13 @@ class EquivariantLinear(eqx.Module):
         self.linear = eqx.nn.Linear(in_features, out_features, key=key1, dtype=dtype)
         self.p_idx = jnp.asarray(p_idx, dtype=jnp.int32)
 
-        self.u = jax.random.uniform(
-            key2,
-            (out_features),
-            dtype,
-            minval=-1 / math.sqrt(out_features),
-            maxval=1 / math.sqrt(out_features),
-        )
+        # self.u = jax.random.uniform(
+        #     key2,
+        #     (out_features),
+        #     dtype,
+        #     minval=-1 / math.sqrt(out_features),
+        #     maxval=1 / math.sqrt(out_features),
+        # )
         self.q_idx = jnp.asarray(q_idx, dtype=jnp.int32)
 
     # @property
@@ -149,7 +149,7 @@ class EquivariantLinear(eqx.Module):
         W = self.linear.weight
         b = self.linear.bias
 
-        # Q = jnp.eye(W.shape[0]) - 2* self.
+        # Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
 
         W_permuted = W[self.q_idx, :][:, self.p_idx]
         W_sym = 0.5 * (W + W_permuted)
