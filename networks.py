@@ -5,6 +5,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from equinox.nn._misc import default_init
 
 
 class EquivariantMLP(eqx.Module):
@@ -89,6 +90,7 @@ class EquivariantLinear(eqx.Module):
 
     linear: eqx.nn.Linear
     u: jax.Array
+    q: jax.Array
 
     def __init__(
         self,
@@ -100,20 +102,22 @@ class EquivariantLinear(eqx.Module):
         key1, key2 = jax.random.split(key)
         self.linear = eqx.nn.Linear(in_features, out_features, key=key1, dtype=dtype)
 
-        self.u = jax.random.uniform(
-            key2,
-            (out_features),
-            dtype,
-            minval=-1 / math.sqrt(out_features),
-            maxval=1 / math.sqrt(out_features),
+        lim = 1 / math.sqrt(out_features)
+
+        self.u = None
+        # self.u = default_init(key2, shape=(out_features), dtype=dtype, lim=lim)
+
+        self.q = default_init(
+            key2, shape=(out_features, out_features), dtype=dtype, lim=lim
         )
 
-    @property
-    def q(self):
-        q = jnp.eye(self.linear.weight.shape[0]) - jnp.outer(self.u, self.u) / jnp.sum(
-            self.u**2
-        )
-        return q
+    # @property
+    # def q(self):
+    #     # q = jnp.eye(self.linear.weight.shape[0]) - jnp.outer(self.u, self.u) / jnp.sum(
+    #     #     self.u**2
+    #     # )
+
+    #     return 1/2 * (self.)
 
     # @property
     # def weight(self):
@@ -137,7 +141,9 @@ class EquivariantLinear(eqx.Module):
         W = self.linear.weight
         b = self.linear.bias
 
-        Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
+        # Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
+
+        Q = 0.5 * (self.q + self.q.T)
 
         if p.ndim == 1:
             W_permuted = Q @ W[:, p]
