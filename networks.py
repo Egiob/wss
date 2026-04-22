@@ -99,14 +99,14 @@ class EquivariantMLP(eqx.Module):
         self.layers_norm = layers_norm
         self.activation = activation
 
-    def __call__(self, x, p, sink_temp=1.0):
+    def __call__(self, x, p, sink_temp=1.0, sink_iter=15):
         block_interms = []
         
         if self.qtype == "sinkhorn":
             # 1. Make it symmetric
             A = 0.5 * (self._q + self._q.T)
             # 2. Relaxed Permutation
-            Q = sinkhorn(A / sink_temp)
+            Q = sinkhorn(A / sink_temp, n_iters=sink_iter)
         else:
             Q = self._q
 
@@ -267,7 +267,7 @@ class ValueNet(eqx.Module):
         if self.name is not None:
             self.name = name
 
-    def forward(self, x):
+    def forward(self, x, sink_temp, sink_iter):
         x1 = x.astype(jnp.float32)
         x2 = jnp.flip(x1, axis=1)
 
@@ -291,6 +291,7 @@ class InvariantValueNet(eqx.Module):
     value_head: eqx.nn.MLP
     p: jax.Array
     name: str
+    qtype: str
 
     def __init__(
         self,
@@ -304,6 +305,7 @@ class InvariantValueNet(eqx.Module):
         name=None,
         qtype="flip_id_fixed",
     ):
+        self.qtype = qtype
         random_key = key
         self.p = (
             jnp.flip(jnp.arange(84).reshape(6, 7, 2), axis=1)
@@ -331,11 +333,16 @@ class InvariantValueNet(eqx.Module):
         if name is not None:
             self.name = name
 
-    def forward(self, x):
+    def forward(self, x, sink_temp, sink_iter):
         x1 = x.astype(jnp.float32)
         x1 = jnp.ravel(x1)
-        o1, _ = self.body(x1, self.p)
+        o1, _ = self.body(x1, self.p, sink_temp=sink_temp, sink_iter=sink_iter)
+        
         p = jax.lax.stop_gradient(self.body._q)
+        if self.qtype == "sinkhorn":
+            A = 0.5 * (p + p.T)
+            p = sinkhorn(A / sink_temp, n_iters=sink_iter)
+            
         v1 = jnp.squeeze(self.value_head(o1, p=p))
 
         return v1

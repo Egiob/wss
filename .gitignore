@@ -8,6 +8,7 @@ __pycache__/
 *.csv
 pytorch/
 bk_
+plots_removed/
 
 # C extensions
 *.so
