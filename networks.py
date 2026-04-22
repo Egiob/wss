@@ -7,12 +7,22 @@ import jax.numpy as jnp
 import numpy as np
 from equinox.nn._misc import default_init
 
+import jax.nn as jnn
+
+def sinkhorn(log_alpha, n_iters=15):
+    for _ in range(n_iters):
+        log_alpha = log_alpha - jax.scipy.special.logsumexp(log_alpha, axis=1, keepdims=True)
+        log_alpha = log_alpha - jax.scipy.special.logsumexp(log_alpha, axis=0, keepdims=True)
+    return jnp.exp(log_alpha)
+
 
 class EquivariantMLP(eqx.Module):
     layers: list[eqx.Module]
     layers_norm: list[eqx.Module]
     activation: callable
-
+    _q: jax.Array
+    qtype: str
+    
     def __init__(
         self,
         key,
@@ -22,7 +32,25 @@ class EquivariantMLP(eqx.Module):
         out_size,
         activation,
         dtype=jnp.float32,
+        qtype="flip_id_fixed"
     ):
+        
+        self.qtype = qtype
+        if qtype == "flip_id_fixed":
+            self._q = jnp.flip(jnp.eye(out_size, dtype=jnp.int32), axis=1)
+        elif qtype == "flip_id_float":
+            self._q = jnp.flip(jnp.eye(out_size, dtype=dtype), axis=1)
+        elif qtype == "learnable_float":
+            key1, key2 = jax.random.split(key)
+            lim = 1 / math.sqrt(out_size)
+            self._q = default_init(key2, shape=(out_size, out_size), dtype=dtype, lim=lim)
+        elif qtype == "sinkhorn":
+            key1, key2 = jax.random.split(key)
+            lim = 1 / math.sqrt(out_size)
+            self._q = default_init(key2, shape=(out_size, out_size), dtype=dtype, lim=lim)
+        else:
+            raise ValueError(f"Invalid qtype: {qtype}")
+        
         layers_norm = []
         layers = []
         if depth == 0:
@@ -71,17 +99,25 @@ class EquivariantMLP(eqx.Module):
         self.layers_norm = layers_norm
         self.activation = activation
 
-    def __call__(self, x, p):
+    def __call__(self, x, p, sink_temp=1.0):
         block_interms = []
+        
+        if self.qtype == "sinkhorn":
+            # 1. Make it symmetric
+            A = 0.5 * (self._q + self._q.T)
+            # 2. Relaxed Permutation
+            Q = sinkhorn(A / sink_temp)
+        else:
+            Q = self._q
 
         for layer, layer_norm in zip(self.layers[:-1], self.layers_norm):
-            x = layer(x, p=p)
+            x = layer(x, p=p, q=Q)
             # x = layer_norm(x)
             x = self.activation(x)
-            p = jax.lax.stop_gradient(layer.q)
+            p = jax.lax.stop_gradient(Q)
             block_interms.append(x)
 
-        x = self.layers[-1](x, p=p)
+        x = self.layers[-1](x, p=p, q=Q)
         return x, block_interms
 
 
@@ -90,7 +126,7 @@ class EquivariantLinear(eqx.Module):
 
     linear: eqx.nn.Linear
     u: jax.Array
-    q: jax.Array
+    # _q: jax.Array
 
     def __init__(
         self,
@@ -104,14 +140,16 @@ class EquivariantLinear(eqx.Module):
 
         lim = 1 / math.sqrt(out_features)
 
-        self.u = None
-        # self.u = default_init(key2, shape=(out_features), dtype=dtype, lim=lim)
+        # self.u = None
+        self.u = default_init(key2, shape=(out_features), dtype=dtype, lim=lim)
 
-        self.q = default_init(
-            key2, shape=(out_features, out_features), dtype=dtype, lim=lim
-        )
+
+
+        # self._q = default_init(
+        #     key2, shape=(out_features, out_features), dtype=dtype, lim=lim
+        # )
         
-        # self.q = jnp.flip(jnp.eye(out_features, dtype=dtype), axis=1)
+        # self._q = jnp.flip(jnp.eye(out_features, dtype=dtype), axis=1)
         
 
     # @property
@@ -120,7 +158,7 @@ class EquivariantLinear(eqx.Module):
     #     #     self.u**2
     #     # )
 
-    #     return 1/2 * (self.)
+    #     return 0.5 * (self._q + self._q.T)
 
     # @property
     # def weight(self):
@@ -140,25 +178,24 @@ class EquivariantLinear(eqx.Module):
     #     else:
     #         return None
 
-    def __call__(self, x, p):
+    def __call__(self, x, p, q):
         W = self.linear.weight
         b = self.linear.bias
 
         # Q = jnp.eye(W.shape[0]) - 2 * jnp.outer(self.u, self.u) / jnp.sum(self.u**2)
 
-        # Q = 0.5 * (self.q + self.q.T)
+        # Q = 0.5 * (self._q + self._q.T)
 
-        Q = self.q
 
         if p.ndim == 1:
-            W_permuted = Q @ W[:, p]
+            W_permuted = q @ W[:, p]
         else:
-            W_permuted = Q @ W @ p
+            W_permuted = q @ W @ p
 
         W_sym = 0.5 * (W + W_permuted)
 
         if b is not None:
-            b_sym = 0.5 * (b + Q @ b)
+            b_sym = 0.5 * (b + q @ b)
         else:
             b_sym = None
 
@@ -202,13 +239,14 @@ class ValueNet(eqx.Module):
         embed_dim,
         activation,
         avg_symmetries,
+        out_size,
         name=None,
     ):
         random_key, subkey = jax.random.split(key)
         self.value_head = eqx.nn.Linear(
             key=subkey,
             in_features=embed_dim,
-            out_features=1,
+            out_features=out_size,
             dtype=jnp.float32,
         )
 
@@ -262,7 +300,9 @@ class InvariantValueNet(eqx.Module):
         body_width,
         embed_dim,
         activation,
+        out_size,
         name=None,
+        qtype="flip_id_fixed",
     ):
         random_key = key
         self.p = (
@@ -279,11 +319,12 @@ class InvariantValueNet(eqx.Module):
             depth=body_depth,
             width=body_width,
             activation=activation,
+            qtype=qtype,
         )
 
         random_key, subkey = jax.random.split(key)
         self.value_head = InvariantLinear(
-            key=subkey, in_features=embed_dim, out_features=1
+            key=subkey, in_features=embed_dim, out_features=out_size
         )
 
         self.name = self.__class__.__name__
@@ -294,7 +335,7 @@ class InvariantValueNet(eqx.Module):
         x1 = x.astype(jnp.float32)
         x1 = jnp.ravel(x1)
         o1, _ = self.body(x1, self.p)
-        p = jax.lax.stop_gradient(self.body.layers[-1].q)
+        p = jax.lax.stop_gradient(self.body._q)
         v1 = jnp.squeeze(self.value_head(o1, p=p))
 
         return v1
