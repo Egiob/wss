@@ -9,6 +9,10 @@ __pycache__/
 pytorch/
 bk_
 plots_removed/
+old_data/
+bad_data/
+*.parquet
+plots/
 
 # C extensions
 *.so
