@@ -125,7 +125,7 @@ class EquivariantLinear(eqx.Module):
     """Hidden layer: Equivariant to permutation."""
 
     linear: eqx.nn.Linear
-    u: jax.Array
+    # u: jax.Array
     # _q: jax.Array
 
     def __init__(
@@ -138,10 +138,10 @@ class EquivariantLinear(eqx.Module):
         key1, key2 = jax.random.split(key)
         self.linear = eqx.nn.Linear(in_features, out_features, key=key1, dtype=dtype)
 
-        lim = 1 / math.sqrt(out_features)
+        # lim = 1 / math.sqrt(out_features)
 
         # self.u = None
-        self.u = default_init(key2, shape=(out_features), dtype=dtype, lim=lim)
+        # self.u = default_init(key2, shape=(out_features), dtype=dtype, lim=lim)
 
 
 
@@ -228,6 +228,7 @@ class ValueNet(eqx.Module):
     body: eqx.nn.MLP
     value_head: eqx.nn.MLP
     avg_symmetries: bool
+    flip_symmetries: bool
     name: str
 
     def __init__(
@@ -241,6 +242,7 @@ class ValueNet(eqx.Module):
         avg_symmetries,
         out_size,
         name=None,
+        flip_symmetries=False,
     ):
         random_key, subkey = jax.random.split(key)
         self.value_head = eqx.nn.Linear(
@@ -262,7 +264,8 @@ class ValueNet(eqx.Module):
         )
 
         self.avg_symmetries = avg_symmetries
-
+        self.flip_symmetries = flip_symmetries
+        
         self.name = self.__class__.__name__
         if self.name is not None:
             self.name = name
@@ -278,6 +281,9 @@ class ValueNet(eqx.Module):
         o2 = self.body(x2)
         v1 = jnp.squeeze(self.value_head(o1))
         v2 = jnp.squeeze(self.value_head(o2))
+        if self.flip_symmetries:
+            v2 = v2[::-1]
+            
         v = (v1 + v2) / 2
 
         if self.avg_symmetries:
@@ -344,5 +350,71 @@ class InvariantValueNet(eqx.Module):
             p = sinkhorn(A / sink_temp, n_iters=sink_iter)
             
         v1 = jnp.squeeze(self.value_head(o1, p=p))
+
+        return v1
+
+class EquivariantValueNet(eqx.Module):
+    body: eqx.nn.MLP
+    equiv_value_head: EquivariantLinear
+    p: jax.Array
+    last_q: jax.Array
+    name: str
+    qtype: str
+
+    def __init__(
+        self,
+        key,
+        in_size,
+        body_depth,
+        body_width,
+        embed_dim,
+        activation,
+        out_size,
+        last_q,
+        name=None,
+        qtype="flip_id_fixed",
+    ):
+        self.qtype = qtype
+        random_key = key
+        self.p = (
+            jnp.flip(jnp.arange(84).reshape(6, 7, 2), axis=1)
+            .reshape(-1)
+            .astype(jnp.int32)
+        )
+        self.last_q = last_q
+        random_key, subkey = jax.random.split(random_key)
+
+        self.body = EquivariantMLP(
+            key=subkey,
+            in_size=in_size,
+            out_size=embed_dim,
+            depth=body_depth,
+            width=body_width,
+            activation=activation,
+            qtype=qtype,
+        )
+
+        random_key, subkey = jax.random.split(key)
+        self.equiv_value_head = EquivariantLinear(
+            key=subkey,
+            in_features=embed_dim,
+            out_features=out_size,
+        )
+
+        self.name = self.__class__.__name__
+        if name is not None:
+            self.name = name
+
+    def forward(self, x, sink_temp, sink_iter):
+        x1 = x.astype(jnp.float32)
+        x1 = jnp.ravel(x1)
+        o1, _ = self.body(x1, self.p, sink_temp=sink_temp, sink_iter=sink_iter)
+        
+        p = jax.lax.stop_gradient(self.body._q)
+        if self.qtype == "sinkhorn":
+            A = 0.5 * (p + p.T)
+            p = sinkhorn(A / sink_temp, n_iters=sink_iter)
+            
+        v1 = jnp.squeeze(self.equiv_value_head(o1, p=p, q=self.last_q))
 
         return v1
